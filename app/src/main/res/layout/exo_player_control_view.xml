@@ -124,7 +124,14 @@
 
     <ImageButton android:id="@+id/delete"
         style="@style/ExoStyledControls.Button.Center.Secondary"
+        android:visibility="gone"
         android:src="@drawable/exo_styled_controls_delete"/>
+
+    <ImageButton android:id="@+id/previous"
+        style="@style/ExoStyledControls.Button.Center.Secondary"
+        android:contentDescription="@string/button_previous"
+        android:visibility="invisible"
+        android:src="@drawable/exo_styled_controls_previous"/>
 
     <ImageButton android:id="@+id/exo_prev"
         style="@style/ExoStyledControls.Button.Center.Previous"/>
@@ -147,6 +154,8 @@
 
     <ImageButton android:id="@+id/next"
         style="@style/ExoStyledControls.Button.Center.Secondary"
+        android:contentDescription="@string/button_next"
+        android:visibility="invisible"
         android:src="@drawable/exo_styled_controls_next"/>
 
   </LinearLayout>

@@ -44,6 +44,12 @@
             app:summary="@string/pref_repeat_toggle_summary"
             app:title="@string/pref_repeat_toggle" />
 
+        <SwitchPreferenceCompat
+            app:key="exitOnPlaybackEnd"
+            app:defaultValue="true"
+            app:summary="@string/pref_exit_on_playback_end_summary"
+            app:title="@string/pref_exit_on_playback_end" />
+
     </PreferenceCategory>
 
     <PreferenceCategory app:title="@string/pref_subtitle_header">

@@ -4,6 +4,7 @@ import static android.content.pm.PackageManager.FEATURE_EXPANDED_PICTURE_IN_PICT
 
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
+import android.Manifest;
 import android.annotation.SuppressLint;
 import android.annotation.TargetApi;
 import android.app.Activity;
@@ -15,12 +16,15 @@ import android.app.RemoteAction;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.ContentResolver;
+import android.content.ContentUris;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.UriPermission;
 import android.content.pm.ActivityInfo;
+import android.content.pm.PackageManager;
 import android.content.res.Configuration;
+import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.Icon;
@@ -33,6 +37,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Parcelable;
 import android.provider.DocumentsContract;
+import android.provider.MediaStore;
 import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.Base64;
@@ -75,6 +80,7 @@ import androidx.media3.common.TrackGroup;
 import androidx.media3.common.TrackSelectionOverride;
 import androidx.media3.common.TrackSelectionParameters;
 import androidx.media3.common.Tracks;
+import androidx.media3.common.VideoSize;
 import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlaybackException;
@@ -105,6 +111,7 @@ import java.io.File;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -145,6 +152,7 @@ public class PlayerActivity extends Activity {
     private static final int REQUEST_CHOOSER_VIDEO_MEDIASTORE = 20;
     private static final int REQUEST_CHOOSER_SUBTITLE_MEDIASTORE = 21;
     private static final int REQUEST_SETTINGS = 100;
+    private static final int REQUEST_MEDIA_VIDEO_PERMISSION = 101;
     private static final int REQUEST_SYSTEM_CAPTIONS = 200;
     public static final int CONTROLLER_TIMEOUT = 3500;
     private static final String ACTION_MEDIA_CONTROL = "media_control";
@@ -157,6 +165,7 @@ public class PlayerActivity extends Activity {
     private CoordinatorLayout coordinatorLayout;
     private TextView titleView;
     private ImageButton buttonOpen;
+    private ImageButton buttonDelete;
     private ImageButton buttonPiP;
     private ImageButton buttonAspectRatio;
     private ImageButton buttonRotation;
@@ -177,10 +186,14 @@ public class PlayerActivity extends Activity {
     public boolean frameRendered;
     private boolean alive;
     public static boolean focusPlay = false;
+    private Uri previousUri;
     private Uri nextUri;
     private static boolean isTvBox;
     public static boolean locked = false;
-    private Thread nextUriThread;
+    private Thread adjacentUriThread;
+    private boolean externalPlaybackIntent;
+    private boolean exitOnPlaybackEnd;
+    private boolean mediaStorePlaylistLoading;
     public Thread frameRateSwitchThread;
 
     public static boolean restoreControllerTimeout = false;
@@ -197,10 +210,16 @@ public class PlayerActivity extends Activity {
     static final String API_SUBS_NAME = "subs.name";
     static final String API_TITLE = "title";
     static final String API_END_BY = "end_by";
+    static final String API_VIDEO_LIST = "video_list";
+    static final String API_VIDEO_LIST_NAME = "video_list.name";
+    static final String API_VIDEO_LIST_EXPLICIT = "video_list_is_explicit";
     boolean apiAccess;
     boolean apiAccessPartial;
     String apiTitle;
     List<MediaItem.SubtitleConfiguration> apiSubs = new ArrayList<>();
+    List<Uri> apiVideoUris = new ArrayList<>();
+    List<String> apiVideoTitles = new ArrayList<>();
+    boolean apiVideoListExplicit;
     boolean intentReturnResult;
     boolean playbackFinished;
 
@@ -250,6 +269,8 @@ public class PlayerActivity extends Activity {
         final Intent launchIntent = getIntent();
         final String action = launchIntent.getAction();
         final String type = launchIntent.getType();
+        externalPlaybackIntent = isExternalPlaybackIntent(launchIntent);
+        exitOnPlaybackEnd = mPrefs.exitOnPlaybackEnd && externalPlaybackIntent;
 
         if ("com.brouken.player.action.SHORTCUT_VIDEOS".equals(action)) {
             openFile(Utils.getMoviesFolderUri());
@@ -271,7 +292,8 @@ public class PlayerActivity extends Activity {
                 Bundle bundle = launchIntent.getExtras();
                 if (bundle != null) {
                     apiAccess = bundle.containsKey(API_POSITION) || bundle.containsKey(API_RETURN_RESULT)
-                            || bundle.containsKey(API_SUBS) || bundle.containsKey(API_SUBS_ENABLE);
+                            || bundle.containsKey(API_SUBS) || bundle.containsKey(API_SUBS_ENABLE)
+                            || bundle.containsKey(API_VIDEO_LIST);
                     if (apiAccess) {
                         mPrefs.setPersistent(false);
                     } else if (bundle.containsKey(API_TITLE)) {
@@ -283,6 +305,7 @@ public class PlayerActivity extends Activity {
                 mPrefs.updateMedia(this, uri, type);
 
                 if (bundle != null) {
+                    readApiVideoList(bundle, uri);
                     Uri defaultSub = null;
                     Parcelable[] subsEnable = bundle.getParcelableArray(API_SUBS_ENABLE);
                     if (subsEnable != null && subsEnable.length > 0) {
@@ -303,7 +326,7 @@ public class PlayerActivity extends Activity {
                     }
                 }
 
-                if (apiSubs.isEmpty()) {
+                if (apiSubs.isEmpty() && apiVideoUris.isEmpty() && !isMediaStoreVideoUri(mPrefs.mediaUri)) {
                     searchSubtitles();
                 }
 
@@ -390,6 +413,12 @@ public class PlayerActivity extends Activity {
             }
             return true;
         });
+
+        buttonDelete = new ImageButton(this, null, 0, R.style.ExoStyledControls_Button_Bottom);
+        buttonDelete.setImageResource(R.drawable.exo_styled_controls_delete);
+        buttonDelete.setContentDescription(getString(R.string.delete_confirmation));
+        buttonDelete.setVisibility(View.GONE);
+        buttonDelete.setOnClickListener(view -> askDeleteMedia());
 
         if (Utils.isPiPSupported(this)) {
             // TODO: Android 12 improvements:
@@ -563,13 +592,22 @@ public class PlayerActivity extends Activity {
             e.printStackTrace();
         }
 
-        findViewById(R.id.delete).setOnClickListener(view -> askDeleteMedia());
+        // Deletion lives in the bottom toolbar so it cannot offset the centered playback controls.
+        findViewById(R.id.delete).setVisibility(View.GONE);
+
+        findViewById(R.id.previous).setOnClickListener(view -> {
+            if ((!apiVideoUris.isEmpty() && player != null && player.hasPreviousMediaItem()) || previousUri != null) {
+                skipToPrevious();
+            } else if (!isTvBox && mPrefs.askScope) {
+                requestDirectoryAccess();
+            }
+        });
 
         findViewById(R.id.next).setOnClickListener(view -> {
-            if (!isTvBox && mPrefs.askScope) {
-                askForScope(false, true);
-            } else {
+            if ((!apiVideoUris.isEmpty() && player != null && player.hasNextMediaItem()) || nextUri != null) {
                 skipToNext();
+            } else if (!isTvBox && mPrefs.askScope) {
+                requestDirectoryAccess();
             }
         });
 
@@ -617,6 +655,7 @@ public class PlayerActivity extends Activity {
         final LinearLayout controls = horizontalScrollView.findViewById(R.id.controls);
 
         controls.addView(buttonOpen);
+        controls.addView(buttonDelete);
         controls.addView(exoSubtitle);
         controls.addView(buttonAspectRatio);
         if (Utils.isPiPSupported(this) && buttonPiP != null) {
@@ -769,6 +808,7 @@ public class PlayerActivity extends Activity {
     public void finish() {
         if (intentReturnResult) {
             Intent intent = new Intent("com.mxtech.intent.result.VIEW");
+            intent.setData(mPrefs.mediaUri);
             intent.putExtra(API_END_BY, playbackFinished ? "playback_completion" : "user");
             if (!playbackFinished) {
                 if (player != null) {
@@ -794,6 +834,10 @@ public class PlayerActivity extends Activity {
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        setIntent(intent);
+        playbackFinished = false;
+        externalPlaybackIntent = isExternalPlaybackIntent(intent);
+        exitOnPlaybackEnd = mPrefs.exitOnPlaybackEnd && externalPlaybackIntent;
 
         if (intent != null) {
             final String action = intent.getAction();
@@ -804,8 +848,26 @@ public class PlayerActivity extends Activity {
                 if (SubtitleUtils.isSubtitle(uri, type)) {
                     handleSubtitles(uri);
                 } else {
+                    resetApiAccess();
+                    final Bundle bundle = intent.getExtras();
+                    if (bundle != null) {
+                        apiAccess = bundle.containsKey(API_POSITION) || bundle.containsKey(API_RETURN_RESULT)
+                                || bundle.containsKey(API_SUBS) || bundle.containsKey(API_SUBS_ENABLE)
+                                || bundle.containsKey(API_VIDEO_LIST);
+                        if (apiAccess) {
+                            mPrefs.setPersistent(false);
+                        }
+                        apiTitle = bundle.getString(API_TITLE);
+                        intentReturnResult = bundle.getBoolean(API_RETURN_RESULT);
+                        readApiVideoList(bundle, uri);
+                    }
                     mPrefs.updateMedia(this, uri, type);
-                    searchSubtitles();
+                    if (bundle != null && bundle.containsKey(API_POSITION)) {
+                        mPrefs.updatePosition((long) bundle.getInt(API_POSITION));
+                    }
+                    if (apiVideoUris.isEmpty() && !isMediaStoreVideoUri(mPrefs.mediaUri)) {
+                        searchSubtitles();
+                    }
                 }
                 focusPlay = true;
                 initializePlayer();
@@ -1068,7 +1130,33 @@ public class PlayerActivity extends Activity {
         apiAccessPartial = false;
         apiTitle = null;
         apiSubs.clear();
+        apiVideoUris.clear();
+        apiVideoTitles.clear();
+        apiVideoListExplicit = false;
+        intentReturnResult = false;
         mPrefs.setPersistent(true);
+    }
+
+    private void readApiVideoList(Bundle bundle, Uri currentUri) {
+        apiVideoUris.clear();
+        apiVideoTitles.clear();
+        apiVideoListExplicit = bundle.getBoolean(API_VIDEO_LIST_EXPLICIT, false);
+
+        final Parcelable[] videos = bundle.getParcelableArray(API_VIDEO_LIST);
+        final String[] names = bundle.getStringArray(API_VIDEO_LIST_NAME);
+        if (videos != null) {
+            for (int i = 0; i < videos.length; i++) {
+                if (videos[i] instanceof Uri && ((Uri) videos[i]).isAbsolute()) {
+                    apiVideoUris.add((Uri) videos[i]);
+                    apiVideoTitles.add(names != null && i < names.length ? names[i] : null);
+                }
+            }
+        }
+
+        if (currentUri != null && !apiVideoUris.contains(currentUri)) {
+            apiVideoUris.add(0, currentUri);
+            apiVideoTitles.add(0, apiTitle);
+        }
     }
 
     @Override
@@ -1089,6 +1177,9 @@ public class PlayerActivity extends Activity {
         if (requestCode == REQUEST_CHOOSER_VIDEO || requestCode == REQUEST_CHOOSER_VIDEO_MEDIASTORE) {
             if (resultCode == RESULT_OK) {
                 resetApiAccess();
+                externalPlaybackIntent = false;
+                exitOnPlaybackEnd = false;
+                playbackFinished = false;
                 restorePlayState = false;
 
                 final Uri uri = data.getData();
@@ -1156,6 +1247,7 @@ public class PlayerActivity extends Activity {
             }
         } else if (requestCode == REQUEST_SETTINGS) {
             mPrefs.loadUserPreferences();
+            exitOnPlaybackEnd = mPrefs.exitOnPlaybackEnd && isExternalPlaybackIntent(getIntent());
             updateSubtitleStyle(this);
         } else {
             super.onActivityResult(requestCode, resultCode, data);
@@ -1173,6 +1265,44 @@ public class PlayerActivity extends Activity {
         SubtitleUtils.clearCache(this);
         uri = Utils.convertToUTF(this, uri);
         mPrefs.updateSubtitle(uri);
+    }
+
+    private int getApiVideoIndex(Uri uri) {
+        final int index = apiVideoUris.indexOf(uri);
+        return index >= 0 ? index : 0;
+    }
+
+    private String getMediaTitle(Uri uri, int apiVideoIndex) {
+        if (!apiVideoUris.isEmpty()) {
+            if (apiVideoIndex >= 0 && apiVideoIndex < apiVideoTitles.size()) {
+                final String playlistTitle = apiVideoTitles.get(apiVideoIndex);
+                if (playlistTitle != null) {
+                    return playlistTitle;
+                }
+            }
+            return Utils.getFileName(this, uri);
+        }
+        return apiTitle != null ? apiTitle : Utils.getFileName(this, uri);
+    }
+
+    private MediaItem buildMediaItem(Uri uri, String mimeType, String title, boolean currentItem) {
+        final MediaItem.Builder builder = new MediaItem.Builder()
+                .setUri(uri)
+                .setMimeType(mimeType);
+        if (title != null) {
+            builder.setMediaMetadata(new MediaMetadata.Builder()
+                    .setTitle(title)
+                    .setDisplayTitle(title)
+                    .build());
+        }
+        if (currentItem && apiAccess && !apiSubs.isEmpty()) {
+            builder.setSubtitleConfigurations(apiSubs);
+        } else if (currentItem && mPrefs.subtitleUri != null && Utils.fileExists(this, mPrefs.subtitleUri)) {
+            final MediaItem.SubtitleConfiguration subtitle =
+                    SubtitleUtils.buildSubtitle(this, mPrefs.subtitleUri, null, true);
+            builder.setSubtitleConfigurations(Collections.singletonList(subtitle));
+        }
+        return builder.build();
     }
 
     public void initializePlayer() {
@@ -1292,29 +1422,22 @@ public class PlayerActivity extends Activity {
             }
             updatebuttonAspectRatioIcon();
 
-            MediaItem.Builder mediaItemBuilder = new MediaItem.Builder()
-                    .setUri(mPrefs.mediaUri)
-                    .setMimeType(mPrefs.mediaType);
-            String title;
-            if (apiTitle != null) {
-                title = apiTitle;
+            final int apiVideoIndex = getApiVideoIndex(mPrefs.mediaUri);
+            final String title = getMediaTitle(mPrefs.mediaUri, apiVideoIndex);
+            if (!apiVideoUris.isEmpty()) {
+                final List<MediaItem> mediaItems = new ArrayList<>();
+                for (int i = 0; i < apiVideoUris.size(); i++) {
+                    final Uri uri = apiVideoUris.get(i);
+                    final String itemMimeType = i == apiVideoIndex ? mPrefs.mediaType : null;
+                    mediaItems.add(buildMediaItem(uri, itemMimeType, getMediaTitle(uri, i), i == apiVideoIndex));
+                }
+                player.setMediaItems(mediaItems, apiVideoIndex, mPrefs.getPosition());
+                // MX-compatible callers such as CX may omit video_list_is_explicit.
+                // Receiving a list is enough to enable continuous playback.
+                player.setPauseAtEndOfMediaItems(false);
             } else {
-                title = Utils.getFileName(PlayerActivity.this, mPrefs.mediaUri);
+                player.setMediaItem(buildMediaItem(mPrefs.mediaUri, mPrefs.mediaType, title, true), mPrefs.getPosition());
             }
-            if (title != null) {
-                final MediaMetadata mediaMetadata = new MediaMetadata.Builder()
-                        .setTitle(title)
-                        .setDisplayTitle(title)
-                        .build();
-                mediaItemBuilder.setMediaMetadata(mediaMetadata);
-            }
-            if (apiAccess && apiSubs.size() > 0) {
-                mediaItemBuilder.setSubtitleConfigurations(apiSubs);
-            } else if (mPrefs.subtitleUri != null && Utils.fileExists(this, mPrefs.subtitleUri)) {
-                MediaItem.SubtitleConfiguration subtitle = SubtitleUtils.buildSubtitle(this, mPrefs.subtitleUri, null, true);
-                mediaItemBuilder.setSubtitleConfigurations(Collections.singletonList(subtitle));
-            }
-            player.setMediaItem(mediaItemBuilder.build(), mPrefs.getPosition());
 
             try {
                 if (loudnessEnhancer != null) {
@@ -1331,33 +1454,39 @@ public class PlayerActivity extends Activity {
 
             updateLoading(true);
 
-            if (mPrefs.getPosition() == 0L || apiAccess || apiAccessPartial) {
+            if (mPrefs.getPosition() == 0L || apiAccess || apiAccessPartial || externalPlaybackIntent) {
                 play = true;
             }
 
-            if (apiTitle != null) {
-                titleView.setText(apiTitle);
-            } else {
-                titleView.setText(Utils.getFileName(this, mPrefs.mediaUri));
-            }
+            titleView.setText(title);
             titleView.setVisibility(View.VISIBLE);
 
             updateButtons(true);
 
             ((DoubleTapPlayerView)playerView).setDoubleTapEnabled(true);
 
-            if (!apiAccess) {
-                if (nextUriThread != null) {
-                    nextUriThread.interrupt();
-                }
-                nextUri = null;
-                nextUriThread = new Thread(() -> {
-                    Uri uri = findNext();
+            if (adjacentUriThread != null) {
+                adjacentUriThread.interrupt();
+            }
+            previousUri = null;
+            nextUri = null;
+            updateNavigationControls();
+            if (!apiAccess && !isMediaStoreVideoUri(mPrefs.mediaUri)) {
+                final Uri mediaUri = mPrefs.mediaUri;
+                adjacentUriThread = new Thread(() -> {
+                    final Uri previous = findPrevious();
+                    final Uri next = findNext();
                     if (!Thread.currentThread().isInterrupted()) {
-                        nextUri = uri;
+                        runOnUiThread(() -> {
+                            if (mPrefs.mediaUri != null && mPrefs.mediaUri.equals(mediaUri)) {
+                                previousUri = previous;
+                                nextUri = next;
+                                updateNavigationControls();
+                            }
+                        });
                     }
                 });
-                nextUriThread.start();
+                adjacentUriThread.start();
             }
 
             player.setHandleAudioBecomingNoisy(!isTvBox);
@@ -1368,6 +1497,7 @@ public class PlayerActivity extends Activity {
 
         player.addListener(playerListener);
         player.prepare();
+        ensureMediaStorePlaylist();
 
         if (restorePlayState) {
             restorePlayState = false;
@@ -1375,6 +1505,139 @@ public class PlayerActivity extends Activity {
             playerView.setControllerShowTimeoutMs(PlayerActivity.CONTROLLER_TIMEOUT);
             player.setPlayWhenReady(true);
         }
+    }
+
+    private boolean isMediaStoreVideoUri(Uri uri) {
+        return uri != null
+                && ContentResolver.SCHEME_CONTENT.equals(uri.getScheme())
+                && "media".equals(uri.getAuthority())
+                && uri.getPath() != null
+                && uri.getPath().contains("/video/");
+    }
+
+    private String getMediaVideoPermission() {
+        return Build.VERSION.SDK_INT >= 33
+                ? Manifest.permission.READ_MEDIA_VIDEO
+                : Manifest.permission.READ_EXTERNAL_STORAGE;
+    }
+
+    private void ensureMediaStorePlaylist() {
+        if (!isMediaStoreVideoUri(mPrefs.mediaUri) || !apiVideoUris.isEmpty() || mediaStorePlaylistLoading) {
+            return;
+        }
+        final String permission = getMediaVideoPermission();
+        if (ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{permission}, REQUEST_MEDIA_VIDEO_PERMISSION);
+            return;
+        }
+        loadMediaStorePlaylist(mPrefs.mediaUri);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
+                                           @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_MEDIA_VIDEO_PERMISSION
+                && grantResults.length > 0
+                && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            ensureMediaStorePlaylist();
+        }
+    }
+
+    private static final class MediaStoreVideo {
+        final long id;
+        final String name;
+        final String mimeType;
+
+        MediaStoreVideo(long id, String name, String mimeType) {
+            this.id = id;
+            this.name = name;
+            this.mimeType = mimeType;
+        }
+    }
+
+    private void loadMediaStorePlaylist(Uri currentUri) {
+        mediaStorePlaylistLoading = true;
+        new Thread(() -> {
+            final List<MediaStoreVideo> videos = new ArrayList<>();
+            String relativePath = null;
+            try (Cursor current = getContentResolver().query(currentUri,
+                    new String[]{MediaStore.Video.Media.RELATIVE_PATH}, null, null, null)) {
+                if (current != null && current.moveToFirst()) {
+                    relativePath = current.getString(0);
+                }
+            } catch (Exception ignored) {
+            }
+
+            if (relativePath != null) {
+                final Uri collection = Build.VERSION.SDK_INT >= 29
+                        ? MediaStore.Video.Media.getContentUri(MediaStore.getVolumeName(currentUri))
+                        : MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
+                final String[] projection = {
+                        MediaStore.Video.Media._ID,
+                        MediaStore.Video.Media.DISPLAY_NAME,
+                        MediaStore.Video.Media.MIME_TYPE
+                };
+                try (Cursor cursor = getContentResolver().query(collection, projection,
+                        MediaStore.Video.Media.RELATIVE_PATH + " = ?",
+                        new String[]{relativePath}, null)) {
+                    if (cursor != null) {
+                        while (cursor.moveToNext()) {
+                            videos.add(new MediaStoreVideo(cursor.getLong(0), cursor.getString(1), cursor.getString(2)));
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
+                videos.sort(Comparator.comparing(video -> video.name == null ? "" : video.name,
+                        String.CASE_INSENSITIVE_ORDER));
+
+                runOnUiThread(() -> applyMediaStorePlaylist(currentUri, collection, videos));
+            } else {
+                runOnUiThread(() -> mediaStorePlaylistLoading = false);
+            }
+        }, "MediaStorePlaylist").start();
+    }
+
+    private void applyMediaStorePlaylist(Uri currentUri, Uri collection, List<MediaStoreVideo> videos) {
+        mediaStorePlaylistLoading = false;
+        if (player == null || mPrefs.mediaUri == null || !mPrefs.mediaUri.equals(currentUri) || videos.size() < 2) {
+            return;
+        }
+
+        final long currentId;
+        try {
+            currentId = ContentUris.parseId(currentUri);
+        } catch (NumberFormatException e) {
+            return;
+        }
+        int currentIndex = -1;
+        apiVideoUris.clear();
+        apiVideoTitles.clear();
+        final List<MediaItem> items = new ArrayList<>();
+        for (int i = 0; i < videos.size(); i++) {
+            final MediaStoreVideo video = videos.get(i);
+            final Uri uri = ContentUris.withAppendedId(collection, video.id);
+            apiVideoUris.add(uri);
+            apiVideoTitles.add(video.name);
+            final boolean isCurrent = video.id == currentId;
+            items.add(buildMediaItem(uri, video.mimeType, video.name, isCurrent));
+            if (isCurrent) {
+                currentIndex = i;
+            }
+        }
+        if (currentIndex < 0) {
+            apiVideoUris.clear();
+            apiVideoTitles.clear();
+            return;
+        }
+
+        final long position = player.getCurrentPosition();
+        final boolean playing = player.getPlayWhenReady();
+        player.setMediaItems(items, currentIndex, position);
+        player.setPauseAtEndOfMediaItems(false);
+        player.prepare();
+        player.setPlayWhenReady(playing);
+        updateNavigationControls();
     }
 
     private void savePlayer() {
@@ -1426,6 +1689,30 @@ public class PlayerActivity extends Activity {
     }
 
     private class PlayerListener implements Player.Listener {
+        @Override
+        public void onVideoSizeChanged(VideoSize videoSize) {
+            final Format format = player != null ? player.getVideoFormat() : null;
+            if (format != null && !isTvBox && mPrefs.orientation == Utils.Orientation.VIDEO) {
+                applyVideoOrientation(format);
+            }
+        }
+
+        @Override
+        public void onMediaItemTransition(MediaItem mediaItem, int reason) {
+            if (mediaItem == null || mediaItem.localConfiguration == null) {
+                return;
+            }
+            final Uri uri = mediaItem.localConfiguration.uri;
+            if (!uri.equals(mPrefs.mediaUri)) {
+                mPrefs.updateMedia(PlayerActivity.this, uri, mediaItem.localConfiguration.mimeType);
+                mPrefs.updatePosition(0L);
+            }
+            final CharSequence title = mediaItem.mediaMetadata.title;
+            titleView.setText(title != null ? title : Utils.getFileName(PlayerActivity.this, uri));
+            playbackFinished = false;
+            updateNavigationControls();
+        }
+
         @Override
         public void onAudioSessionIdChanged(int audioSessionId) {
             try {
@@ -1498,12 +1785,7 @@ public class PlayerActivity extends Activity {
 
                     if (format != null) {
                         if (!isTvBox && mPrefs.orientation == Utils.Orientation.VIDEO) {
-                            if (Utils.isPortrait(format)) {
-                                PlayerActivity.this.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT);
-                            } else {
-                                PlayerActivity.this.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
-                            }
-                            updateButtonRotation();
+                            applyVideoOrientation(format);
                         }
 
                         updateSubtitleViewMargin(format);
@@ -1574,7 +1856,7 @@ public class PlayerActivity extends Activity {
                 }
             } else if (state == Player.STATE_ENDED) {
                 playbackFinished = true;
-                if (apiAccess) {
+                if (apiAccess || exitOnPlaybackEnd) {
                     finish();
                 }
             }
@@ -1596,6 +1878,16 @@ public class PlayerActivity extends Activity {
                 }
             }
         }
+    }
+
+    @SuppressLint("SourceLockedOrientationActivity")
+    private void applyVideoOrientation(Format format) {
+        if (Utils.isPortrait(format)) {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT);
+        } else {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+        }
+        updateButtonRotation();
     }
 
     private void enableRotation() {
@@ -1682,8 +1974,29 @@ public class PlayerActivity extends Activity {
 
     private void requestDirectoryAccess() {
         enableRotation();
-        final Intent intent = createBaseFileIntent(Intent.ACTION_OPEN_DOCUMENT_TREE, Utils.getMoviesFolderUri());
+        final Intent intent = createBaseFileIntent(Intent.ACTION_OPEN_DOCUMENT_TREE, getCurrentMediaDirectoryUri());
         safelyStartActivityForResult(intent, REQUEST_CHOOSER_SCOPE_DIR);
+    }
+
+    private Uri getCurrentMediaDirectoryUri() {
+        final Uri mediaUri = mPrefs != null ? mPrefs.mediaUri : null;
+        if (mediaUri != null
+                && ContentResolver.SCHEME_CONTENT.equals(mediaUri.getScheme())
+                && "com.android.externalstorage.documents".equals(mediaUri.getAuthority())
+                && DocumentsContract.isDocumentUri(this, mediaUri)) {
+            try {
+                final String documentId = DocumentsContract.getDocumentId(mediaUri);
+                final int separator = documentId.lastIndexOf('/');
+                final int volumeSeparator = documentId.indexOf(':');
+                final String directoryId = separator >= 0
+                        ? documentId.substring(0, separator)
+                        : documentId.substring(0, volumeSeparator + 1);
+                return DocumentsContract.buildTreeDocumentUri(mediaUri.getAuthority(), directoryId);
+            } catch (IllegalArgumentException | IndexOutOfBoundsException ignored) {
+                // Opaque providers cannot expose their parent directory through SAF.
+            }
+        }
+        return Utils.getMoviesFolderUri();
     }
 
     private Intent createBaseFileIntent(final String action, final Uri initialUri) {
@@ -2023,7 +2336,29 @@ public class PlayerActivity extends Activity {
         }
     }
 
+    private boolean isExternalPlaybackIntent(Intent intent) {
+        if (intent == null) {
+            return false;
+        }
+        if (Intent.ACTION_VIEW.equals(intent.getAction()) && intent.getData() != null) {
+            return !SubtitleUtils.isSubtitle(intent.getData(), intent.getType());
+        }
+        if (Intent.ACTION_SEND.equals(intent.getAction()) && "text/plain".equals(intent.getType())) {
+            final String text = intent.getStringExtra(Intent.EXTRA_TEXT);
+            return text != null && Uri.parse(text).isAbsolute();
+        }
+        return false;
+    }
+
     Uri findNext() {
+        return findAdjacentVideo(true);
+    }
+
+    Uri findPrevious() {
+        return findAdjacentVideo(false);
+    }
+
+    private Uri findAdjacentVideo(boolean nextDirection) {
         // TODO: Unify with searchSubtitles()
         if (mPrefs.scopeUri != null || isTvBox) {
             DocumentFile video = null;
@@ -2046,16 +2381,16 @@ public class PlayerActivity extends Activity {
             }
 
             if (video != null) {
-                DocumentFile next;
+                DocumentFile adjacent;
                 if (!isTvBox) {
-                    next = SubtitleUtils.findNext(video);
+                    adjacent = nextDirection ? SubtitleUtils.findNext(video) : SubtitleUtils.findPrevious(video);
                 } else {
                     File parentRaw = videoRaw.getParentFile();
                     DocumentFile dir = DocumentFile.fromFile(parentRaw);
-                    next = SubtitleUtils.findNext(video, dir);
+                    adjacent = nextDirection ? SubtitleUtils.findNext(video, dir) : SubtitleUtils.findPrevious(video, dir);
                 }
-                if (next != null) {
-                    return next.getUri();
+                if (adjacent != null) {
+                    return adjacent.getUri();
                 }
             }
         }
@@ -2158,10 +2493,22 @@ public class PlayerActivity extends Activity {
     }
 
     void setEndControlsVisible(boolean visible) {
-        final int deleteVisible = (visible && haveMedia && Utils.isDeletable(this, mPrefs.mediaUri)) ? View.VISIBLE : View.INVISIBLE;
-        final int nextVisible = (visible && haveMedia && (nextUri != null || (mPrefs.askScope && !isTvBox))) ? View.VISIBLE : View.INVISIBLE;
-        findViewById(R.id.delete).setVisibility(deleteVisible);
-        findViewById(R.id.next).setVisibility(nextVisible);
+        final int deleteVisible = (visible && haveMedia && Utils.isDeletable(this, mPrefs.mediaUri)) ? View.VISIBLE : View.GONE;
+        buttonDelete.setVisibility(deleteVisible);
+        updateNavigationControls();
+    }
+
+    void updateNavigationControls() {
+        final boolean canRequestScope = !apiAccess && mPrefs != null && mPrefs.askScope && !isTvBox;
+        final boolean mediaAvailable = haveMedia && mPrefs != null && mPrefs.mediaUri != null;
+        final boolean playlistHasPrevious = !apiVideoUris.isEmpty() && player != null && player.hasPreviousMediaItem();
+        final boolean playlistHasNext = !apiVideoUris.isEmpty() && player != null && player.hasNextMediaItem();
+        findViewById(R.id.previous).setVisibility(mediaAvailable
+                && (playlistHasPrevious || previousUri != null || canRequestScope)
+                ? View.VISIBLE : View.INVISIBLE);
+        findViewById(R.id.next).setVisibility(mediaAvailable
+                && (playlistHasNext || nextUri != null || canRequestScope)
+                ? View.VISIBLE : View.INVISIBLE);
     }
 
     void askDeleteMedia() {
@@ -2212,12 +2559,31 @@ public class PlayerActivity extends Activity {
     }
 
     void skipToNext() {
-        if (nextUri != null) {
-            releasePlayer();
-            mPrefs.updateMedia(this, nextUri, null);
-            searchSubtitles();
-            initializePlayer();
+        if (!apiVideoUris.isEmpty() && player != null && player.hasNextMediaItem()) {
+            playbackFinished = false;
+            player.seekToNextMediaItem();
+            player.play();
+        } else if (nextUri != null) {
+            playAdjacent(nextUri);
         }
+    }
+
+    void skipToPrevious() {
+        if (!apiVideoUris.isEmpty() && player != null && player.hasPreviousMediaItem()) {
+            playbackFinished = false;
+            player.seekToPreviousMediaItem();
+            player.play();
+        } else if (previousUri != null) {
+            playAdjacent(previousUri);
+        }
+    }
+
+    private void playAdjacent(Uri uri) {
+        playbackFinished = false;
+        releasePlayer();
+        mPrefs.updateMedia(this, uri, null);
+        searchSubtitles();
+        initializePlayer();
     }
 
     void notifyAudioSessionUpdate(final boolean active) {

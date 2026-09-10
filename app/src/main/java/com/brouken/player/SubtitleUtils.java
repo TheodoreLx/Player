@@ -186,24 +186,36 @@ class SubtitleUtils {
     }
 
     public static DocumentFile findNext(DocumentFile video, DocumentFile dir) {
+        return findAdjacentVideo(video, dir, 1);
+    }
+
+    public static DocumentFile findPrevious(DocumentFile video) {
+        DocumentFile dir = video.getParentFile();
+        return findPrevious(video, dir);
+    }
+
+    public static DocumentFile findPrevious(DocumentFile video, DocumentFile dir) {
+        return findAdjacentVideo(video, dir, -1);
+    }
+
+    private static DocumentFile findAdjacentVideo(DocumentFile video, DocumentFile dir, int direction) {
         if (dir == null) {
             return null;
         }
 
         try {
             DocumentFile[] list = dir.listFiles();
-            Arrays.sort(list, (a, b) -> a.getName().compareToIgnoreCase(b.getName()));
+            Arrays.sort(list, (a, b) -> naturalCompare(a.getName(), b.getName()));
 
             final String videoName = video.getName();
-            boolean matchFound = false;
-
-            for (DocumentFile file : list) {
-                if (file.getName().equals(videoName)) {
-                    matchFound = true;
-                } else if (matchFound) {
-                    if (isVideoFile(file)) {
-                        return file;
+            for (int i = 0; i < list.length; i++) {
+                if (videoName != null && videoName.equals(list[i].getName())) {
+                    for (int j = i + direction; j >= 0 && j < list.length; j += direction) {
+                        if (isVideoFile(list[j])) {
+                            return list[j];
+                        }
                     }
+                    return null;
                 }
             }
         } catch (NullPointerException e) {
@@ -213,8 +225,43 @@ class SubtitleUtils {
         return null;
     }
 
+    private static int naturalCompare(String left, String right) {
+        if (left == null) return right == null ? 0 : 1;
+        if (right == null) return -1;
+
+        int leftIndex = 0;
+        int rightIndex = 0;
+        while (leftIndex < left.length() && rightIndex < right.length()) {
+            char leftChar = left.charAt(leftIndex);
+            char rightChar = right.charAt(rightIndex);
+            if (Character.isDigit(leftChar) && Character.isDigit(rightChar)) {
+                int leftEnd = leftIndex;
+                int rightEnd = rightIndex;
+                while (leftEnd < left.length() && Character.isDigit(left.charAt(leftEnd))) leftEnd++;
+                while (rightEnd < right.length() && Character.isDigit(right.charAt(rightEnd))) rightEnd++;
+
+                String leftNumber = left.substring(leftIndex, leftEnd).replaceFirst("^0+(?!$)", "");
+                String rightNumber = right.substring(rightIndex, rightEnd).replaceFirst("^0+(?!$)", "");
+                int lengthCompare = Integer.compare(leftNumber.length(), rightNumber.length());
+                if (lengthCompare != 0) return lengthCompare;
+                int numberCompare = leftNumber.compareTo(rightNumber);
+                if (numberCompare != 0) return numberCompare;
+                leftIndex = leftEnd;
+                rightIndex = rightEnd;
+                continue;
+            }
+
+            int charCompare = Character.compare(Character.toLowerCase(leftChar), Character.toLowerCase(rightChar));
+            if (charCompare != 0) return charCompare;
+            leftIndex++;
+            rightIndex++;
+        }
+        return Integer.compare(left.length(), right.length());
+    }
+
     public static boolean isVideoFile(DocumentFile file) {
-        return file.isFile() && file.getType().startsWith("video/");
+        final String type = file.getType();
+        return file.isFile() && type != null && type.startsWith("video/");
     }
 
     public static boolean isSubtitleFile(DocumentFile file) {

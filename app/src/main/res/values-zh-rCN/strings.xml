@@ -11,7 +11,7 @@
     <string name="video_resize_fit">适应</string>
     <string name="delete_confirmation">删除</string>
     <string name="delete_query">删除这个文件？</string>
-    <string name="request_scope">要自动加载外部字幕或启用跳到目录中的下一个文件，请允许%s访问包含您的视频（例如电影）的最顶层文件夹的。</string>
+    <string name="request_scope">要自动加载外部字幕或启用目录中的上一个和下一个视频，请允许 %s 访问包含视频的最顶层文件夹（例如“电影”）。</string>
     <string name="pref_tunneling_summary">隧道模式为 4K/HDR 内容提供了更好的支持，但可能无法在所有设备上工作</string>
     <string name="pref_skip_silence_off">按原样播放</string>
     <string name="pref_skip_silence_on">跳过音频缺失部分</string>
@@ -27,11 +27,15 @@
     <string name="pref_title">设置</string>
     <string name="pref_repeat_toggle">重复切换</string>
     <string name="pref_repeat_toggle_summary">允许无限循环视频的额外控制（需要重新启动应用程序）</string>
+    <string name="pref_exit_on_playback_end">外部播放结束后退出</string>
+    <string name="pref_exit_on_playback_end_summary">外部打开的视频播放结束后返回调用应用</string>
     <string name="shortcut_videos">视频</string>
     <string name="button_open">打开</string>
     <string name="button_crop">调整大小</string>
     <string name="button_rotate">旋转</string>
     <string name="button_pip">画中画</string>
+    <string name="button_previous">上一个视频</string>
+    <string name="button_next">下一个视频</string>
     <string name="pref_file_access_auto">自动</string>
     <string name="pref_file_access">文件访问</string>
     <string name="mediastore_empty">没有找到视频文件</string>
