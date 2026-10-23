@@ -89,6 +89,7 @@ import androidx.media3.exoplayer.RenderersFactory;
 import androidx.media3.exoplayer.SeekParameters;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector;
+import androidx.media3.effect.ScaleAndRotateTransformation;
 import androidx.media3.extractor.DefaultExtractorsFactory;
 import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory;
 import androidx.media3.extractor.ts.TsExtractor;
@@ -169,6 +170,7 @@ public class PlayerActivity extends Activity {
     private ImageButton buttonPiP;
     private ImageButton buttonAspectRatio;
     private ImageButton buttonRotation;
+    private ImageButton buttonVideoRotation;
     private ImageButton exoSettings;
     private ImageButton exoPlayPause;
     private ProgressBar loadingProgressBar;
@@ -193,6 +195,7 @@ public class PlayerActivity extends Activity {
     private Thread adjacentUriThread;
     private boolean externalPlaybackIntent;
     private boolean exitOnPlaybackEnd;
+    private int videoRotationDegrees;
     private boolean mediaStorePlaylistLoading;
     public Thread frameRateSwitchThread;
 
@@ -465,8 +468,23 @@ public class PlayerActivity extends Activity {
         buttonRotation.setOnClickListener(view -> {
             mPrefs.orientation = Utils.getNextOrientation(mPrefs.orientation);
             Utils.setOrientation(PlayerActivity.this, mPrefs.orientation);
+            if (mPrefs.orientation == Utils.Orientation.VIDEO && player != null && player.getVideoFormat() != null) {
+                applyVideoOrientation(player.getVideoFormat());
+            }
             updateButtonRotation();
             Utils.showText(playerView, getString(mPrefs.orientation.description), 2500);
+            resetHideCallbacks();
+        });
+        buttonVideoRotation = new ImageButton(this, null, 0, R.style.ExoStyledControls_Button_Bottom);
+        buttonVideoRotation.setImageResource(R.drawable.ic_rotate_video_24dp);
+        buttonVideoRotation.setContentDescription(getString(R.string.button_rotate_video));
+        buttonVideoRotation.setOnClickListener(view -> {
+            videoRotationDegrees = (videoRotationDegrees + 90) % 360;
+            applyVideoRotation();
+            if (mPrefs.orientation == Utils.Orientation.VIDEO && player != null && player.getVideoFormat() != null) {
+                applyVideoOrientation(player.getVideoFormat());
+            }
+            Utils.showText(playerView, getString(R.string.video_rotation, videoRotationDegrees));
             resetHideCallbacks();
         });
 
@@ -658,6 +676,7 @@ public class PlayerActivity extends Activity {
         controls.addView(buttonDelete);
         controls.addView(exoSubtitle);
         controls.addView(buttonAspectRatio);
+        controls.addView(buttonVideoRotation);
         if (Utils.isPiPSupported(this) && buttonPiP != null) {
             controls.addView(buttonPiP);
         }
@@ -1308,6 +1327,7 @@ public class PlayerActivity extends Activity {
     public void initializePlayer() {
         boolean isNetworkUri = Utils.isSupportedNetworkUri(mPrefs.mediaUri);
         haveMedia = mPrefs.mediaUri != null;
+        videoRotationDegrees = 0;
 
         if (player != null) {
             player.removeListener(playerListener);
@@ -1375,6 +1395,8 @@ public class PlayerActivity extends Activity {
         }
 
         player = playerBuilder.build();
+        // Initialize the effects pipeline before prepare so rotation can change during playback.
+        player.setVideoEffects(Collections.emptyList());
 
         AudioAttributes audioAttributes = new AudioAttributes.Builder()
                 .setUsage(C.USAGE_MEDIA)
@@ -1704,6 +1726,10 @@ public class PlayerActivity extends Activity {
             }
             final Uri uri = mediaItem.localConfiguration.uri;
             if (!uri.equals(mPrefs.mediaUri)) {
+                if (videoRotationDegrees != 0) {
+                    videoRotationDegrees = 0;
+                    applyVideoRotation();
+                }
                 mPrefs.updateMedia(PlayerActivity.this, uri, mediaItem.localConfiguration.mimeType);
                 mPrefs.updatePosition(0L);
             }
@@ -1882,12 +1908,28 @@ public class PlayerActivity extends Activity {
 
     @SuppressLint("SourceLockedOrientationActivity")
     private void applyVideoOrientation(Format format) {
-        if (Utils.isPortrait(format)) {
+        final boolean portrait = Utils.isPortrait(format) != (videoRotationDegrees % 180 != 0);
+        if (portrait) {
             setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT);
         } else {
             setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
         }
         updateButtonRotation();
+    }
+
+    private void applyVideoRotation() {
+        if (player == null) {
+            return;
+        }
+        if (videoRotationDegrees == 0) {
+            player.setVideoEffects(Collections.emptyList());
+        } else {
+            // Media3's effect angle is counterclockwise; the button turns clockwise.
+            player.setVideoEffects(Collections.singletonList(
+                    new ScaleAndRotateTransformation.Builder()
+                            .setRotationDegrees(360f - videoRotationDegrees)
+                            .build()));
+        }
     }
 
     private void enableRotation() {
@@ -2606,6 +2648,7 @@ public class PlayerActivity extends Activity {
             Utils.setButtonEnabled(this, buttonPiP, enable);
         }
         Utils.setButtonEnabled(this, buttonAspectRatio, enable);
+        Utils.setButtonEnabled(this, buttonVideoRotation, enable);
         if (isTvBox) {
             Utils.setButtonEnabled(this, exoSettings, true);
         } else {

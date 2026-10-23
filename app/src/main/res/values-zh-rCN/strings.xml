@@ -33,6 +33,8 @@
     <string name="button_open">打开</string>
     <string name="button_crop">调整大小</string>
     <string name="button_rotate">旋转</string>
+    <string name="button_rotate_video">旋转视频画面</string>
+    <string name="video_rotation">画面旋转：%1$d°</string>
     <string name="button_pip">画中画</string>
     <string name="button_previous">上一个视频</string>
     <string name="button_next">下一个视频</string>

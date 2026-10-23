@@ -38,6 +38,8 @@
     <string name="button_open">Open</string>
     <string name="button_crop">Resize</string>
     <string name="button_rotate">Rotate</string>
+    <string name="button_rotate_video">Rotate video picture</string>
+    <string name="video_rotation">Video rotation: %1$d°</string>
     <string name="button_pip">Picture-in-picture</string>
     <string name="button_previous">Previous video</string>
     <string name="button_next">Next video</string>
